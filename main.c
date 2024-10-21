@@ -7,23 +7,22 @@
 #include <netdb.h>
 #include <sys/socket.h>
 
+enum Arg{
+	PROGRAM,
+	FLAG,
+	IP,
+	PORT,
+	PORTEND
+};
 
-int main(int argc, char *argv[]){
+void scan(char *target_ip, int port){
 	int sockfd;
 	struct sockaddr_in server_addr;
-
-	if(argc != 3){
-		printf("Please provide an IP address and a port as so: %s [IP address] [PORT]\n", argv[0]);
-		return 1;
-	}
-
-	char *target_ip = argv[1];
-	int port = atoi(argv[2]);
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if(sockfd < 0){
 		perror("Error creating socket");
-		return -1;	
+		return;
 	}
 	memset(&server_addr, 0, sizeof(server_addr));
 	server_addr.sin_family = AF_INET;
@@ -35,7 +34,7 @@ int main(int argc, char *argv[]){
 		    } else {
 			printf("Invalid IP address format.\n");
 		    }
-		    return -1;
+		    return;
 	}
 
 	if(connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0){
@@ -54,6 +53,26 @@ int main(int argc, char *argv[]){
 	}
 
 	close(sockfd);
+}
+
+int main(int argc, char *argv[]){
+	if(argc < 4 || argc > 5){
+		printf("Please provide an IP address and a port as so: %s [FLAG] [IP address] [PORT]\n", argv[0]);
+		return 1;
+	}
+
+	if(argc == 5){
+		if(strcmp(argv[FLAG], "-sR") == 0){
+			for(int port = atoi(argv[PORT]); port < atoi(argv[PORTEND])+1; port++){
+				scan(argv[IP], port);
+			}
+		}
+	}
+	else{
+		if(strcmp(argv[FLAG], "-s") == 0){
+			scan(argv[IP], atoi(argv[PORT]));
+		}
+	}
 
 	return 0;
 }
