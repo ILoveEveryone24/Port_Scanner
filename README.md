@@ -1,3 +1,5 @@
 # Port scanner in C
 ### Usage:
-./program [IP] [PORT]
+```console
+$ ./program [IP] [PORT]
+```
