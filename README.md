@@ -1,5 +1,10 @@
 # Port scanner in C
-### Usage:
+## Usage:
+### Single port scan:
 ```console
-$ ./program [IP] [PORT]
+$ ./program -s [IP] [PORT]
+```
+### Multiple ports scan (inclusive):
+```console
+$ ./program -sR [IP] [PORT RANGE START] [PORT RANGE END]
 ```
