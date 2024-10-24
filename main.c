@@ -9,6 +9,10 @@
 #include <netinet/tcp.h>
 #include <netinet/ip.h>
 
+#include <net/if.h>
+
+#define TIMEOUT_SECONDS 20
+
 enum Arg{
 	PROGRAM,
 	FLAG,
@@ -43,6 +47,74 @@ unsigned char checksum(void *b, int len){
 	return result;
 }
 
+char* get_local_ip(){
+	char hostname[256];
+	struct hostent *host_entry;
+	char *ip;
+
+	gethostname(hostname, sizeof(hostname));
+
+	host_entry = gethostbyname(hostname);
+	if(host_entry == NULL){
+		perror("gethostbyname failed");
+		return NULL;	
+	}
+
+	ip = inet_ntoa(*(struct in_addr*)host_entry->h_addr_list[0]);
+	return ip;
+}
+	
+void receive_response(int sock_r, char *target_ip, int port){
+	char buffer[4096];
+	struct sockaddr_in source_addr;
+	socklen_t addr_len = sizeof(source_addr);
+
+	struct ifreq ifr;
+	memset(&ifr, 0, sizeof(ifr));
+	snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "lo");  // Loopback interface
+
+	if (setsockopt(sock_r, SOL_SOCKET, SO_BINDTODEVICE, (void *)&ifr, sizeof(ifr)) < 0) {
+	    perror("Error binding to loopback interface");
+	    close(sock_r);
+	    return;
+	}
+
+	while(1){
+		int data_size = recvfrom(sock_r, buffer, sizeof(buffer), 0, (struct sockaddr*)&source_addr, &addr_len);	
+		printf("Received %d bytes from %s\n", data_size, inet_ntoa(source_addr.sin_addr));
+		if(data_size < 0){
+			if(errno == EAGAIN || errno == EWOULDBLOCK){
+				printf("Timeout waiting for response.\n");
+				perror("Error receiving response");
+				return;	
+			}
+			else{
+				perror("recvfrom error");
+				return;	
+			}
+		}
+
+		struct iphdr *iph = (struct iphdr *)buffer;
+
+		if(iph->protocol == IPPROTO_TCP){
+			struct tcphdr *tcph = (struct tcphdr *)(buffer + (iph->ihl * 4));
+
+			if(source_addr.sin_addr.s_addr == inet_addr(target_ip) && ntohs(tcph->source) == 12345){
+				if(tcph->syn == 1 && tcph->ack == 1){
+					printf("Port %d is open.\n", port);		
+				}
+				else if(tcph->rst == 1){
+					printf("Port %d is closed.\n", port);	
+				}
+				else{
+					printf("Unexpected response on port %d\n", port);	
+				}
+				break;
+			}
+		}
+	}
+}
+
 void stealth_scan(char *target_ip, int port){
 	int sock_r;
 	struct sockaddr_in server_addr;
@@ -55,6 +127,17 @@ void stealth_scan(char *target_ip, int port){
 		perror("Error creating raw socket");
 		return;
 	}
+	
+	struct timeval timeout;
+	timeout.tv_sec = TIMEOUT_SECONDS;
+	timeout.tv_usec = 0;
+
+	if(setsockopt(sock_r, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0){
+		perror("Error setting socket timeout");
+		close(sock_r);
+		return;	
+	}
+
 	memset(&server_addr, 0, sizeof(server_addr));
 
 	server_addr.sin_family = AF_INET;
@@ -65,16 +148,31 @@ void stealth_scan(char *target_ip, int port){
 
 	struct tcphdr *tcph = (struct tcphdr *) (packet + sizeof(struct iphdr));
 
+	char *local_ip = get_local_ip();
+	if(local_ip != NULL){
+		printf("Local IP Address: %s\n", local_ip);	
+	}
+
+	local_ip = "10.0.0.2";
+
+	int one = 1;
+	if (setsockopt(sock_r, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one)) < 0) {
+	    perror("Error setting IP_HDRINCL");
+	    close(sock_r);
+	    return;
+	}
+
+
 	iph->ihl = 5;
 	iph->version = 4;
 	iph->tos = 0;
 	iph->tot_len = sizeof(struct iphdr) + sizeof(struct tcphdr);
-	iph->id = htonl(12345);
+	iph->id = htonl(54321);
 	iph->frag_off = 0;
 	iph->ttl = 225;
 	iph->protocol = IPPROTO_TCP;
 	iph->check = 0;
-	iph->saddr = inet_addr("192.168.1.2");
+	iph->saddr = inet_addr(local_ip);
 	iph->daddr = server_addr.sin_addr.s_addr;
 
 	tcph->source = htons(12345); 
@@ -88,7 +186,7 @@ void stealth_scan(char *target_ip, int port){
 	tcph->urg_ptr = 0;
 
 	struct pseudo_header psh;
-	psh.source_address = inet_addr("192.168.1.2");
+	psh.source_address = inet_addr(local_ip);
 	psh.dest_address = server_addr.sin_addr.s_addr;
 	psh.placeholder = 0;
 	psh.protocol = IPPROTO_TCP;
@@ -102,16 +200,24 @@ void stealth_scan(char *target_ip, int port){
 	tcph->check = checksum((unsigned short *) pseudogram, psize);
 	iph->check = checksum((unsigned short *) packet, iph->tot_len);
 
+	printf("SYN flag: %d\n", tcph->syn); // Should print 1
+
+
 	if(sendto(sock_r, packet, iph->tot_len, 0, (struct sockaddr *) &server_addr, sizeof(server_addr)) < 0){
 		perror("Error sending packet");
+		free(pseudogram);
+		close(sock_r);
 		return;
 	}
 	else{
 		printf("Packet sent!\n");	
 	}
 
-	close(sock_r);
 	free(pseudogram);
+
+	receive_response(sock_r, target_ip, port);
+	
+	close(sock_r);
 }
 
 void scan(char *target_ip, int port){
@@ -161,6 +267,13 @@ int main(int argc, char *argv[]){
 	}
 
 	if(argc == 5){
+		if(atoi(argv[PORT]) < 0){
+			argv[PORT] = "0";
+		}
+		else if(atoi(argv[PORT]) > 65535){
+			argv[PORT] = "65535";
+		}
+		//HANDLE TIMEOUT
 		if(strcmp(argv[FLAG], "-sR") == 0){
 			for(int port = atoi(argv[PORT]); port < atoi(argv[PORTEND])+1; port++){
 				scan(argv[IP], port);
@@ -168,8 +281,12 @@ int main(int argc, char *argv[]){
 		}
 	}
 	else{
+		//HANDLE TIMEOUT
 		if(strcmp(argv[FLAG], "-s") == 0){
 			scan(argv[IP], atoi(argv[PORT]));
+		}
+		else if(strcmp(argv[FLAG], "-sS") == 0){
+			stealth_scan(argv[IP], atoi(argv[PORT]));
 		}
 	}
 
